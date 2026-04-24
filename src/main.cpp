@@ -61,6 +61,23 @@ String topicFanSpeedCommand;
 String topicAdcState;
 String topicFilterState;
 String topicRestartCommand;
+String topicHomeAssistantStatus;
+bool homeAssistantOnline = false;
+bool homeAssistantStatusKnown = false;
+String homeAssistantLastPayload = "";
+unsigned long homeAssistantLastUpdateMs = 0;
+bool homeAssistantStatusSubscribed = false;
+
+bool mqttWasConnected = false;
+int mqttConnectAttempts = 0;
+int mqttConnectSuccesses = 0;
+int mqttConnectFailures = 0;
+int mqttLastStateCode = -1;
+String mqttLastStateText = "not attempted";
+String mqttLastError = "none";
+unsigned long mqttLastAttemptMs = 0;
+unsigned long mqttLastConnectMs = 0;
+unsigned long mqttLastDisconnectMs = 0;
 
 struct ButtonState {
   uint8_t pin;
@@ -83,6 +100,44 @@ bool mqttEnabled() {
 
 bool hasMqttAuth() {
   return MQTT_USER[0] != '\0';
+}
+
+const char* mqttStateToText(int stateCode) {
+  switch (stateCode) {
+    case -4: return "connection timeout";
+    case -3: return "connection lost";
+    case -2: return "connect failed";
+    case -1: return "disconnected";
+    case 0:  return "connected";
+    case 1:  return "bad protocol";
+    case 2:  return "bad client id";
+    case 3:  return "server unavailable";
+    case 4:  return "bad credentials";
+    case 5:  return "not authorized";
+    default: return "unknown";
+  }
+}
+
+void updateMqttStateFromClient() {
+  mqttLastStateCode = mqttClient.state();
+  mqttLastStateText = mqttStateToText(mqttLastStateCode);
+}
+
+String jsonEscape(const String& input) {
+  String escaped;
+  escaped.reserve(input.length() + 8);
+  for (size_t i = 0; i < input.length(); ++i) {
+    const char c = input.charAt(i);
+    switch (c) {
+      case '\\': escaped += "\\\\"; break;
+      case '"': escaped += "\\\""; break;
+      case '\n': escaped += "\\n"; break;
+      case '\r': escaped += "\\r"; break;
+      case '\t': escaped += "\\t"; break;
+      default: escaped += c; break;
+    }
+  }
+  return escaped;
 }
 
 void publishMqttState();
@@ -173,13 +228,53 @@ String buildStatusJson() {
   json += ",\"fallback_ap_active\":";
   json += fallbackApActive ? "true" : "false";
   json += ",\"ip\":\"";
-  json += (fallbackApActive ? WiFi.softAPIP().toString() : WiFi.localIP().toString());
+  json += jsonEscape(fallbackApActive ? WiFi.softAPIP().toString() : WiFi.localIP().toString());
   json += "\",\"fan_speed\":";
   json += fanSpeed;
   json += ",\"led_adc\":";
   json += String(ledAdcValue, 3);
   json += ",\"led_sensor_on\":";
   json += ledSensorOn ? "true" : "false";
+  json += ",\"mqtt_connected\":";
+  json += mqttEnabled() && mqttClient.connected() ? "true" : "false";
+  json += ",\"mqtt_enabled\":";
+  json += mqttEnabled() ? "true" : "false";
+  json += ",\"mqtt_host\":";
+  json += "\"" + jsonEscape(String(MQTT_HOST)) + "\"";
+  json += ",\"mqtt_port\":";
+  json += MQTT_PORT;
+  json += ",\"mqtt_auth_configured\":";
+  json += hasMqttAuth() ? "true" : "false";
+  json += ",\"mqtt_client_state_code\":";
+  json += mqttLastStateCode;
+  json += ",\"mqtt_client_state_text\":";
+  json += "\"" + jsonEscape(mqttLastStateText) + "\"";
+  json += ",\"mqtt_last_error\":";
+  json += "\"" + jsonEscape(mqttLastError) + "\"";
+  json += ",\"mqtt_connect_attempts\":";
+  json += mqttConnectAttempts;
+  json += ",\"mqtt_connect_successes\":";
+  json += mqttConnectSuccesses;
+  json += ",\"mqtt_connect_failures\":";
+  json += mqttConnectFailures;
+  json += ",\"mqtt_last_attempt_ms\":";
+  json += mqttLastAttemptMs;
+  json += ",\"mqtt_last_connect_ms\":";
+  json += mqttLastConnectMs;
+  json += ",\"mqtt_last_disconnect_ms\":";
+  json += mqttLastDisconnectMs;
+  json += ",\"homeassistant_status_known\":";
+  json += homeAssistantStatusKnown ? "true" : "false";
+  json += ",\"homeassistant_online\":";
+  json += homeAssistantOnline ? "true" : "false";
+  json += ",\"homeassistant_status_topic\":";
+  json += "\"" + jsonEscape(topicHomeAssistantStatus) + "\"";
+  json += ",\"homeassistant_status_subscribed\":";
+  json += homeAssistantStatusSubscribed ? "true" : "false";
+  json += ",\"homeassistant_last_payload\":";
+  json += "\"" + jsonEscape(homeAssistantLastPayload) + "\"";
+  json += ",\"homeassistant_last_update_ms\":";
+  json += homeAssistantLastUpdateMs;
   json += "}";
   return json;
 }
@@ -189,6 +284,17 @@ void handleRoot() {
   html += "<title>FOERNUFTIG</title><style>body{font-family:Arial,sans-serif;max-width:720px;margin:2rem auto;padding:0 1rem;}button{padding:.6rem 1rem;margin:.2rem;}</style></head><body>";
   html += "<h1>FOERNUFTIG Controller</h1>";
   html += "<p>WiFi mode: <strong>" + String(fallbackApActive ? "Fallback AP" : "Station") + "</strong></p>";
+  html += "<p>MQTT: <strong>" + String((mqttEnabled() && mqttClient.connected()) ? "Connected" : "Disconnected") + "</strong></p>";
+  html += "<p>Home Assistant: <strong>" + String(homeAssistantStatusKnown ? (homeAssistantOnline ? "Online" : "Offline") : "Unknown") + "</strong></p>";
+  html += "<h2>Connection diagnostics</h2>";
+  html += "<p>MQTT host/port: <strong>" + String(MQTT_HOST) + ":" + String(MQTT_PORT) + "</strong></p>";
+  html += "<p>MQTT auth: <strong>" + String(hasMqttAuth() ? "yes" : "no") + "</strong></p>";
+  html += "<p>MQTT state: <strong>" + String(mqttLastStateCode) + " (" + mqttLastStateText + ")</strong></p>";
+  html += "<p>MQTT last error: <strong>" + mqttLastError + "</strong></p>";
+  html += "<p>MQTT attempts/success/fail: <strong>" + String(mqttConnectAttempts) + " / " + String(mqttConnectSuccesses) + " / " + String(mqttConnectFailures) + "</strong></p>";
+  html += "<p>MQTT last attempt/connect/disconnect ms: <strong>" + String(mqttLastAttemptMs) + " / " + String(mqttLastConnectMs) + " / " + String(mqttLastDisconnectMs) + "</strong></p>";
+  html += "<p>HA status topic subscribed: <strong>" + String(homeAssistantStatusSubscribed ? "yes" : "no") + "</strong></p>";
+  html += "<p>HA last payload/update ms: <strong>" + homeAssistantLastPayload + " / " + String(homeAssistantLastUpdateMs) + "</strong></p>";
   html += "<p>Fan speed: <strong>" + String(fanSpeed) + "</strong></p>";
   html += "<p>ADC A0: <strong>" + String(ledAdcValue, 3) + "</strong> | Filter sensor: <strong>" + String(ledSensorOn ? "ON" : "OFF") + "</strong></p>";
   html += "<p><a href='/status'>JSON status</a></p>";
@@ -368,6 +474,7 @@ void initMqttTopics() {
   topicAdcState = topicBase + "/sensor/adc/state";
   topicFilterState = topicBase + "/binary/filter/state";
   topicRestartCommand = topicBase + "/restart/set";
+  topicHomeAssistantStatus = "homeassistant/status";
 }
 
 void publishMqttDiscovery() {
@@ -441,6 +548,15 @@ void mqttCallback(char* topic, byte* payload, unsigned int length) {
     return;
   }
 
+  if (topicString == topicHomeAssistantStatus) {
+    homeAssistantStatusKnown = true;
+    homeAssistantOnline = message.equalsIgnoreCase("online");
+    homeAssistantLastPayload = message;
+    homeAssistantLastUpdateMs = millis();
+    Serial.printf("Home Assistant status: topic=%s payload=%s\n", topic, message.c_str());
+    return;
+  }
+
   if (topicString == topicRestartCommand && message == "RESTART") {
     ESP.restart();
   }
@@ -448,6 +564,7 @@ void mqttCallback(char* topic, byte* payload, unsigned int length) {
 
 void setupMqtt() {
   if (!mqttEnabled()) {
+    mqttLastError = "MQTT disabled (empty MQTT_HOST)";
     return;
   }
 
@@ -484,8 +601,22 @@ void ensureMqttConnected() {
   }
 
   if (mqttClient.connected()) {
+    if (!mqttWasConnected) {
+      mqttWasConnected = true;
+      mqttLastConnectMs = millis();
+      updateMqttStateFromClient();
+      mqttLastError = "none";
+      Serial.println("MQTT connected");
+    }
     mqttClient.loop();
     return;
+  }
+
+  if (mqttWasConnected) {
+    mqttWasConnected = false;
+    mqttLastDisconnectMs = millis();
+    updateMqttStateFromClient();
+    Serial.printf("MQTT disconnected, state=%d (%s)\n", mqttLastStateCode, mqttLastStateText.c_str());
   }
 
   const unsigned long now = millis();
@@ -493,6 +624,8 @@ void ensureMqttConnected() {
     return;
   }
   lastMqttReconnectAttemptMs = now;
+  mqttLastAttemptMs = now;
+  mqttConnectAttempts++;
 
   const String clientId = String(DEVICE_NAME) + "-" + String(ESP.getChipId(), HEX);
   const String availabilityTopic = topicBase + "/status";
@@ -504,13 +637,46 @@ void ensureMqttConnected() {
     connected = mqttClient.connect(clientId.c_str(), availabilityTopic.c_str(), 0, true, "offline");
   }
 
+  updateMqttStateFromClient();
+
   if (!connected) {
+    mqttConnectFailures++;
+    mqttLastError = String("connect failed: ") + mqttLastStateText + " (" + String(mqttLastStateCode) + ")";
+    Serial.printf("MQTT connect failed host=%s port=%u auth=%s state=%d (%s)\n",
+                  MQTT_HOST,
+                  MQTT_PORT,
+                  hasMqttAuth() ? "yes" : "no",
+                  mqttLastStateCode,
+                  mqttLastStateText.c_str());
     return;
   }
 
-  mqttClient.publish(availabilityTopic.c_str(), "online", true);
-  mqttClient.subscribe(topicFanSpeedCommand.c_str());
-  mqttClient.subscribe(topicRestartCommand.c_str());
+  mqttConnectSuccesses++;
+  mqttWasConnected = true;
+  mqttLastConnectMs = now;
+  mqttLastError = "none";
+  Serial.printf("MQTT connect ok host=%s port=%u auth=%s clientId=%s\n",
+                MQTT_HOST,
+                MQTT_PORT,
+                hasMqttAuth() ? "yes" : "no",
+                clientId.c_str());
+
+  if (!mqttClient.publish(availabilityTopic.c_str(), "online", true)) {
+    mqttLastError = "publish availability failed";
+    Serial.println("MQTT publish failed: availability topic");
+  }
+
+  const bool subFan = mqttClient.subscribe(topicFanSpeedCommand.c_str());
+  const bool subRestart = mqttClient.subscribe(topicRestartCommand.c_str());
+  const bool subHa = mqttClient.subscribe(topicHomeAssistantStatus.c_str());
+  homeAssistantStatusSubscribed = subHa;
+  if (!subFan || !subRestart || !subHa) {
+    mqttLastError = "one or more subscribe calls failed";
+    Serial.printf("MQTT subscribe results fan=%s restart=%s haStatus=%s\n",
+                  subFan ? "ok" : "fail",
+                  subRestart ? "ok" : "fail",
+                  subHa ? "ok" : "fail");
+  }
 
   publishMqttDiscovery();
   publishMqttState();
