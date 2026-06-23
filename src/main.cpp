@@ -54,10 +54,14 @@ bool mqttDiscoveryPublished = false;
 int lastPublishedFanSpeed = -1;
 float lastPublishedAdc = -1.0f;
 int8_t lastPublishedLedSensorOn = -1;
+int8_t lastPublishedFanSwitchOn = -1;
+int lastFanSpeedBeforeOff = 1;
 
 String topicBase;
 String topicFanSpeedState;
 String topicFanSpeedCommand;
+String topicFanSwitchState;
+String topicFanSwitchCommand;
 String topicAdcState;
 String topicFilterState;
 String topicRestartCommand;
@@ -471,6 +475,8 @@ void initMqttTopics() {
   topicBase = MQTT_BASE_TOPIC;
   topicFanSpeedState = topicBase + "/fan/speed/state";
   topicFanSpeedCommand = topicBase + "/fan/speed/set";
+  topicFanSwitchState = topicBase + "/fan/switch/state";
+  topicFanSwitchCommand = topicBase + "/fan/switch/set";
   topicAdcState = topicBase + "/sensor/adc/state";
   topicFilterState = topicBase + "/binary/filter/state";
   topicRestartCommand = topicBase + "/restart/set";
@@ -524,7 +530,18 @@ void publishMqttDiscovery() {
   restartCfg += "\"dev\":{\"ids\":[\"" + node + "\"]}";
   restartCfg += "}";
 
+  String switchCfg = "{";
+  switchCfg += "\"name\":\"" + name + " Fan Switch\",";
+  switchCfg += "\"uniq_id\":\"" + node + "_fan_switch\",";
+  switchCfg += "\"stat_t\":\"" + topicFanSwitchState + "\",";
+  switchCfg += "\"cmd_t\":\"" + topicFanSwitchCommand + "\",";
+  switchCfg += "\"pl_on\":\"ON\",\"pl_off\":\"OFF\",";
+  switchCfg += "\"avty_t\":\"" + availabilityTopic + "\",";
+  switchCfg += "\"dev\":{\"ids\":[\"" + node + "\"]}";
+  switchCfg += "}";
+
   mqttClient.publish(("homeassistant/number/" + node + "/fan_speed/config").c_str(), speedCfg.c_str(), true);
+  mqttClient.publish(("homeassistant/switch/" + node + "/fan_switch/config").c_str(), switchCfg.c_str(), true);
   mqttClient.publish(("homeassistant/sensor/" + node + "/led_adc/config").c_str(), adcCfg.c_str(), true);
   mqttClient.publish(("homeassistant/binary_sensor/" + node + "/filter/config").c_str(), filterCfg.c_str(), true);
   mqttClient.publish(("homeassistant/button/" + node + "/restart/config").c_str(), restartCfg.c_str(), true);
@@ -544,6 +561,18 @@ void mqttCallback(char* topic, byte* payload, unsigned int length) {
     const int requested = message.toInt();
     if (requested >= 0 && requested <= 3) {
       applyFanSpeed(requested);
+    }
+    return;
+  }
+
+  if (topicString == topicFanSwitchCommand) {
+    if (message.equalsIgnoreCase("ON")) {
+      applyFanSpeed(lastFanSpeedBeforeOff > 0 ? lastFanSpeedBeforeOff : 1);
+    } else if (message.equalsIgnoreCase("OFF")) {
+      if (fanSpeed > 0) {
+        lastFanSpeedBeforeOff = fanSpeed;
+      }
+      applyFanSpeed(0);
     }
     return;
   }
@@ -592,6 +621,12 @@ void publishMqttState() {
   if (ledState != lastPublishedLedSensorOn) {
     mqttClient.publish(topicFilterState.c_str(), ledSensorOn ? "ON" : "OFF", true);
     lastPublishedLedSensorOn = ledState;
+  }
+
+  const int8_t switchOn = (fanSpeed > 0) ? 1 : 0;
+  if (switchOn != lastPublishedFanSwitchOn) {
+    mqttClient.publish(topicFanSwitchState.c_str(), switchOn ? "ON" : "OFF", true);
+    lastPublishedFanSwitchOn = switchOn;
   }
 }
 
@@ -667,13 +702,15 @@ void ensureMqttConnected() {
   }
 
   const bool subFan = mqttClient.subscribe(topicFanSpeedCommand.c_str());
+  const bool subFanSwitch = mqttClient.subscribe(topicFanSwitchCommand.c_str());
   const bool subRestart = mqttClient.subscribe(topicRestartCommand.c_str());
   const bool subHa = mqttClient.subscribe(topicHomeAssistantStatus.c_str());
   homeAssistantStatusSubscribed = subHa;
-  if (!subFan || !subRestart || !subHa) {
+  if (!subFan || !subFanSwitch || !subRestart || !subHa) {
     mqttLastError = "one or more subscribe calls failed";
-    Serial.printf("MQTT subscribe results fan=%s restart=%s haStatus=%s\n",
+    Serial.printf("MQTT subscribe results fan=%s fanSwitch=%s restart=%s haStatus=%s\n",
                   subFan ? "ok" : "fail",
+                  subFanSwitch ? "ok" : "fail",
                   subRestart ? "ok" : "fail",
                   subHa ? "ok" : "fail");
   }
